@@ -1,0 +1,22 @@
+{
+  "name": "sym-research-api",
+  "version": "1.0.0",
+  "description": "Symsearch research API — SearXNG + Groq synthesis for Pro360",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test tests/api.test.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.3.1",
+    "express": "^4.18.2",
+    "groq-sdk": "^0.8.0",
+    "stripe": "^20.4.0"
+  },
+  "devDependencies": {
+    "supertest": "^7.2.2",
+    "vitest": "^4.0.18"
+  }
+}
