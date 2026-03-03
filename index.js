@@ -17,6 +17,11 @@ import http from 'http';
 import crypto from 'crypto';
 import Stripe from 'stripe';
 
+// ─── Phase 2 modules (compiled from TypeScript) ───────────────────────────────
+import { classifyIntent as classifyIntentV2 } from './dist/intent-classifier.js';
+import { maybeChain } from './dist/query-chainer.js';
+import { trackSearch } from './dist/analytics.js';
+
 const app = express();
 const PORT = 3200;
 const RESEARCH_KEY = 'd16896c294bcd842c69fb59c46ddb84d9736cbb053c020124f0eb80653bd1e91';
@@ -525,12 +530,18 @@ async function generateRelatedQueries(query, role) {
 }
 
 // ─── Intent Classifier ────────────────────────────────────────────────────────
+// Legacy mode classifier (keeps backward-compat for role-context and stream endpoints)
 function classifyIntent(query) {
   const q = query.toLowerCase();
   if (/not cool|not heat|blower|error code|fault|refrigerant|capacitor|contactor|diagnostic|troubleshoot|tonnage|cfm|seer/.test(q)) return 'technical';
   if (/competitor|pricing|how much|market|revenue|charge|rate|invoice|profit|margin|bid|quote/.test(q)) return 'business';
   if (/permit|code|regulation|epa|certification|license|legal|compliance|nate|ahri/.test(q)) return 'compliance';
   return 'general';
+}
+
+// Phase 2 typed intent — wraps classifyIntentV2, used to tag search results
+function getTypedIntent(query) {
+  return classifyIntentV2(query); // { intent: IntentType, confidence: number }
 }
 
 // ─── Analytics (in-memory) ────────────────────────────────────────────────────
@@ -565,7 +576,10 @@ app.post('/api/research', async (req, res) => {
     return res.status(400).json({ error: 'query is required' });
   }
 
-  console.log(`[research] query="${query}" role=${role} mode=${mode}`);
+  // Phase 2: typed intent classification
+  const intentResult = getTypedIntent(query);
+
+  console.log(`[research] query="${query}" role=${role} mode=${mode} intent=${intentResult.intent}(${intentResult.confidence})`);
 
   try {
     // 1. Fetch from SearXNG
@@ -573,31 +587,32 @@ app.post('/api/research', async (req, res) => {
     const rawResults = searchData.results || [];
 
     if (rawResults.length === 0) {
+      // Track analytics for empty results
+      trackSearch({
+        query: query.trim(),
+        intent: intentResult.intent,
+        result_count: 0,
+        latency_ms: Date.now() - startTime,
+        cache_hit: false,
+      }).catch(() => {});
+
       return res.json({
         answer: 'No results found for that query. Try rephrasing or use more specific terms.',
         sources: [],
         confidence: 0,
         relatedQueries: [],
+        intent: intentResult.intent,
       });
     }
 
-    // 2. Query chaining — if weak results, refine and merge
-    let finalResults = rawResults;
-    let chained = false;
-    const initialConfidence = Math.min(0.95, 0.4 + (rawResults.length / 20) * 0.55);
-    if (initialConfidence < 0.6 && rawResults.length < 5) {
-      const refinedQuery = `${query.trim()} HVAC ${mode === 'technical' ? 'troubleshooting guide' : mode === 'business' ? 'pricing data' : mode === 'compliance' ? 'regulations' : 'explained'}`;
-      try {
-        const refinedData = await searchSearXNG(refinedQuery);
-        if (refinedData.results?.length) {
-          // Merge: deduplicate by URL, prioritize original results
-          const seen = new Set(rawResults.map(r => r.url));
-          const extra = refinedData.results.filter(r => !seen.has(r.url));
-          finalResults = [...rawResults, ...extra].slice(0, 12);
-          chained = true;
-        }
-      } catch { /* graceful — use original results */ }
-    }
+    // 2. Phase 2: Query chaining via maybeChain (replaces inline logic)
+    const runSearch = async (q) => {
+      const data = await searchSearXNG(q);
+      return data.results || [];
+    };
+    const preChainLen = rawResults.length;
+    const finalResults = await maybeChain(query.trim(), rawResults, runSearch);
+    const chained = finalResults.length > preChainLen;
 
     // 3. Synthesize in parallel with related queries
     const [answer, relatedQueries] = await Promise.all([
@@ -605,7 +620,7 @@ app.post('/api/research', async (req, res) => {
       generateRelatedQueries(query, role),
     ]);
 
-    // 4. Apply feedback boosts + format sources
+    // 4. Apply feedback boosts + format sources (tagged with intent)
     const queryHash = sha256(query.trim());
     const boosts = await getFeedbackBoosts(queryHash);
     const boostedResults = [...finalResults].sort((a, b) => (boosts[b.url] || 0) - (boosts[a.url] || 0));
@@ -615,14 +630,25 @@ app.post('/api/research', async (req, res) => {
       snippet: r.content || r.snippet || '',
       relevance: Math.max(0.1, 1 - (i * 0.12)),
       feedback: boosts[r.url] || 0,
+      intent: intentResult.intent, // Phase 2: tag each source with classified intent
     }));
 
     // 5. Confidence based on result count and quality
     const confidence = Math.min(0.95, 0.4 + (finalResults.length / 20) * 0.55);
+    const latencyMs = Date.now() - startTime;
 
-    res.json({ answer, sources, confidence, relatedQueries, chained });
+    res.json({ answer, sources, confidence, relatedQueries, chained, intent: intentResult.intent });
 
-    analytics.log(query, mode, role, confidence, Date.now() - startTime);
+    // Phase 2: analytics tracking (fire-and-forget, never throws)
+    trackSearch({
+      query: query.trim(),
+      intent: intentResult.intent,
+      result_count: finalResults.length,
+      latency_ms: latencyMs,
+      cache_hit: false,
+    }).catch(() => {});
+
+    analytics.log(query, mode, role, confidence, latencyMs);
 
   } catch (err) {
     console.error('[research] error:', err.message);
