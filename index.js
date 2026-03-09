@@ -13,32 +13,44 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import Groq from 'groq-sdk';
-import http from 'http';
 import crypto from 'crypto';
 import Stripe from 'stripe';
+import { pathToFileURL } from 'node:url';
 
 // ─── Phase 2 modules (compiled from TypeScript) ───────────────────────────────
 import { classifyIntent as classifyIntentV2 } from './dist/intent-classifier.js';
 import { maybeChain } from './dist/query-chainer.js';
 import { trackSearch } from './dist/analytics.js';
+import { runtimeConfig, getStartupWarnings } from './lib/runtime-config.js';
+import { getLaneConfig, getLaneSearchEngines, resolveSearchLane } from './lib/request-lane.js';
+import { buildSearchCacheKey, dedupeSearchRequest, getCachedSearchResponse, setCachedSearchResponse } from './lib/search-cache.js';
+import { rankAndDiversifyResults } from './lib/source-policy.js';
+import { attachSearchHeaders, getTelemetrySnapshot, recordSearchTelemetry } from './lib/telemetry.js';
 
 const app = express();
-const PORT = 3200;
-const RESEARCH_KEY = 'd16896c294bcd842c69fb59c46ddb84d9736cbb053c020124f0eb80653bd1e91';
-const SEARXNG_URL = 'http://localhost:8888';
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const SUPABASE_URL = 'https://mzkvfhzvxhjuayxfdwjw.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im16a3ZmaHp2eGhqdWF5eGZkd2p3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc3MjQyMzUsImV4cCI6MjA4MzMwMDIzNX0.iRQ5ZI2GDfQWdhM6aNbUWF8ocrGUm8e4xlmuSvhExmY';
-const STRIPE_SECRET = process.env.STRIPE_SECRET_KEY || null;
-const stripe = STRIPE_SECRET ? new Stripe(STRIPE_SECRET) : null;
-
-const groq = new Groq({ apiKey: GROQ_API_KEY });
+const PORT = runtimeConfig.port;
+const RESEARCH_KEY = runtimeConfig.researchInternalKey;
+const SEARXNG_URL = runtimeConfig.searxngUrl;
+const SEARXNG_KEY = runtimeConfig.searxngAuthKey;
+const SUPABASE_URL = runtimeConfig.supabaseUrl;
+const SUPABASE_KEY = runtimeConfig.supabaseAnonKey;
+const stripe = runtimeConfig.stripeSecretKey ? new Stripe(runtimeConfig.stripeSecretKey) : null;
+const groq = runtimeConfig.groqApiKey ? new Groq({ apiKey: runtimeConfig.groqApiKey }) : null;
+const startupWarnings = getStartupWarnings();
 
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
+for (const warning of startupWarnings) {
+  console.warn(`[startup] ${warning}`);
+}
+
 // ─── Supabase Key Lookup ──────────────────────────────────────────────────────
 async function supabaseFetch(path, options = {}) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    return null;
+  }
+
   const { headers: extraHeaders = {}, ...restOptions } = options;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     headers: {
@@ -144,14 +156,16 @@ function checkRateLimit(key, tier = 'internal') {
 // ─── Auth + Rate Limit Middleware ─────────────────────────────────────────────
 app.use('/api/research', async (req, res, next) => {
   const key = req.headers['x-research-key'] || req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
+  const requestedLane = req.headers['x-symsearch-lane'] || req.body?.lane;
 
   if (!key) {
     return res.status(403).json({ error: 'Missing API key. Include X-Research-Key header.' });
   }
 
   // Internal/team key — full access
-  if (key === INTERNAL_KEY) {
+  if (INTERNAL_KEY && key === INTERNAL_KEY) {
     req.apiTier = 'internal';
+    req.searchLane = resolveSearchLane('internal', requestedLane);
     return next();
   }
 
@@ -171,6 +185,7 @@ app.use('/api/research', async (req, res, next) => {
       res.setHeader('X-RateLimit-Remaining', remaining);
       req.apiTier = 'free';
       req.apiKey = key;
+      req.searchLane = resolveSearchLane('free', requestedLane);
       return next();
     }
 
@@ -187,6 +202,7 @@ app.use('/api/research', async (req, res, next) => {
     req.apiTier = keyInfo.tier;
     req.apiKey = key;
     req.apiKeyId = keyInfo.keyId;
+    req.searchLane = resolveSearchLane(keyInfo.tier, requestedLane);
 
     // Log usage async (non-blocking)
     const query = req.body?.query || null;
@@ -203,13 +219,26 @@ app.use('/api/research', async (req, res, next) => {
     res.setHeader('X-RateLimit-Remaining', remaining);
     req.apiTier = 'free';
     req.apiKey = key;
+    req.searchLane = resolveSearchLane('free', requestedLane);
     next();
   }
 });
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'sym-research-api', port: PORT });
+  res.json({
+    status: 'ok',
+    service: 'sym-research-api',
+    port: PORT,
+    warnings: startupWarnings,
+    config: {
+      internalKeyConfigured: Boolean(INTERNAL_KEY),
+      groqConfigured: Boolean(groq),
+      stripeConfigured: Boolean(stripe),
+      supabaseConfigured: Boolean(SUPABASE_URL && SUPABASE_KEY),
+      searxngUrl: SEARXNG_URL,
+    },
+  });
 });
 
 // ─── Key List (by email — no auth needed, email-scoped) ──────────────────────
@@ -443,23 +472,31 @@ app.post('/api/keys/generate', async (req, res) => {
 });
 
 // ─── SearXNG Query ────────────────────────────────────────────────────────────
-async function searchSearXNG(query, engines = 'google,brave,duckduckgo') {
-  return new Promise((resolve, reject) => {
-    const params = new URLSearchParams({ q: query, format: 'json', engines });
-    const url = `${SEARXNG_URL}/search?${params.toString()}`;
-    
-    http.get(url, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(data));
-        } catch {
-          reject(new Error('Failed to parse SearXNG response'));
-        }
-      });
-    }).on('error', reject);
+async function searchSearXNG(query, options = {}) {
+  const params = new URLSearchParams({ q: query, format: 'json' });
+  if (options.engines) {
+    params.set('engines', options.engines);
+  }
+
+  const headers = {};
+  if (SEARXNG_KEY) {
+    headers['X-Search-Key'] = SEARXNG_KEY;
+  }
+
+  const res = await fetch(`${SEARXNG_URL}/search?${params.toString()}`, {
+    headers,
+    signal: AbortSignal.timeout(options.timeoutMs || 8000),
   });
+
+  if (!res.ok) {
+    throw new Error(`SearXNG returned ${res.status}`);
+  }
+
+  const data = await res.json();
+  return {
+    ...data,
+    results: Array.isArray(data.results) ? data.results : [],
+  };
 }
 
 // ─── Role-Based Context ───────────────────────────────────────────────────────
@@ -473,7 +510,29 @@ function getRoleContext(role, mode) {
 }
 
 // ─── Groq Synthesis ───────────────────────────────────────────────────────────
-async function synthesizeWithGroq(query, results, role, mode) {
+function buildFallbackAnswer(results) {
+  return results
+    .slice(0, 5)
+    .map((r, index) => `[${index + 1}] ${r.title}\n${r.content || r.snippet || ''}`)
+    .join('\n\n') || 'No synthesis available.';
+}
+
+function formatSources(results, maxSources, boosts, intent) {
+  return results.slice(0, maxSources).map((r, i) => ({
+    title: r.title || 'Untitled',
+    url: r.url,
+    snippet: r.content || r.snippet || '',
+    relevance: Math.max(0.1, 1 - (i * 0.12)),
+    feedback: boosts?.[r.url] || 0,
+    intent,
+  }));
+}
+
+async function synthesizeWithGroq(query, results, role, mode, laneConfig) {
+  if (!groq) {
+    return buildFallbackAnswer(results);
+  }
+
   const roleContext = getRoleContext(role, mode);
   
   const topResults = results.slice(0, 8).map((r, i) => 
@@ -500,7 +559,7 @@ Keep it practical and HVAC-business focused.`;
     messages: [{ role: 'user', content: prompt }],
     model: 'llama-3.3-70b-versatile',
     temperature: 0.3,
-    max_tokens: 1024,
+    max_tokens: laneConfig.synthesisMaxTokens,
   });
 
   return completion.choices[0]?.message?.content || 'No synthesis available.';
@@ -508,6 +567,10 @@ Keep it practical and HVAC-business focused.`;
 
 // ─── Related Queries ──────────────────────────────────────────────────────────
 async function generateRelatedQueries(query, role) {
+  if (!groq) {
+    return [];
+  }
+
   const roleContext = getRoleContext(role);
   
   const completion = await groq.chat.completions.create({
@@ -563,7 +626,16 @@ const analytics = {
 app.get('/api/analytics', (req, res) => {
   const key = req.headers['x-research-key'];
   if (!key || key !== RESEARCH_KEY) return res.status(403).json({ error: 'Forbidden' });
-  res.json(analytics.summary());
+  res.json({
+    analytics: analytics.summary(),
+    telemetry: getTelemetrySnapshot(),
+  });
+});
+
+app.get('/api/telemetry', (req, res) => {
+  const key = req.headers['x-research-key'];
+  if (!key || key !== RESEARCH_KEY) return res.status(403).json({ error: 'Forbidden' });
+  res.json(getTelemetrySnapshot());
 });
 
 // ─── Main Research Endpoint ───────────────────────────────────────────────────
@@ -578,80 +650,144 @@ app.post('/api/research', async (req, res) => {
 
   // Phase 2: typed intent classification
   const intentResult = getTypedIntent(query);
+  const lane = req.searchLane || 'customer';
+  const laneConfig = getLaneConfig(lane);
+  const cacheKey = buildSearchCacheKey({
+    lane,
+    query,
+    role,
+    mode,
+    intent: intentResult.intent,
+  });
 
-  console.log(`[research] query="${query}" role=${role} mode=${mode} intent=${intentResult.intent}(${intentResult.confidence})`);
+  console.log(`[research] lane=${lane} query="${query}" role=${role} mode=${mode} intent=${intentResult.intent}(${intentResult.confidence})`);
 
   try {
-    // 1. Fetch from SearXNG
-    const searchData = await searchSearXNG(query.trim());
-    const rawResults = searchData.results || [];
-
-    if (rawResults.length === 0) {
-      // Track analytics for empty results
-      trackSearch({
-        query: query.trim(),
+    const cached = getCachedSearchResponse(cacheKey);
+    if (cached) {
+      const latencyMs = Date.now() - startTime;
+      attachSearchHeaders(res, {
+        lane,
         intent: intentResult.intent,
-        result_count: 0,
-        latency_ms: Date.now() - startTime,
-        cache_hit: false,
-      }).catch(() => {});
-
-      return res.json({
-        answer: 'No results found for that query. Try rephrasing or use more specific terms.',
-        sources: [],
-        confidence: 0,
-        relatedQueries: [],
-        intent: intentResult.intent,
+        cacheHit: true,
+        deduped: false,
+        chained: Boolean(cached.chained),
       });
+      recordSearchTelemetry({
+        lane,
+        intent: intentResult.intent,
+        cacheHit: true,
+        deduped: false,
+        chained: Boolean(cached.chained),
+        latencyMs,
+        resultCount: cached.sources?.length || 0,
+      });
+      return res.json(cached);
     }
 
-    // 2. Phase 2: Query chaining via maybeChain (replaces inline logic)
-    const runSearch = async (q) => {
-      const data = await searchSearXNG(q);
-      return data.results || [];
-    };
-    const preChainLen = rawResults.length;
-    const finalResults = await maybeChain(query.trim(), rawResults, runSearch);
-    const chained = finalResults.length > preChainLen;
+    const { value: payload, deduped } = await dedupeSearchRequest(cacheKey, async () => {
+      // 1. Fetch from SearXNG
+      const searchData = await searchSearXNG(query.trim(), {
+        engines: getLaneSearchEngines(lane, intentResult.intent),
+      });
+      const rawResults = rankAndDiversifyResults(searchData.results || [], {
+        intent: intentResult.intent,
+        query,
+        limit: laneConfig.resultLimit,
+      });
 
-    // 3. Synthesize in parallel with related queries
-    const [answer, relatedQueries] = await Promise.all([
-      synthesizeWithGroq(query, finalResults, role, mode),
-      generateRelatedQueries(query, role),
-    ]);
+      if (rawResults.length === 0) {
+        return {
+          answer: 'No results found for that query. Try rephrasing or use more specific terms.',
+          sources: [],
+          confidence: 0,
+          relatedQueries: [],
+          intent: intentResult.intent,
+          lane,
+          chained: false,
+        };
+      }
 
-    // 4. Apply feedback boosts + format sources (tagged with intent)
-    const queryHash = sha256(query.trim());
-    const boosts = await getFeedbackBoosts(queryHash);
-    const boostedResults = [...finalResults].sort((a, b) => (boosts[b.url] || 0) - (boosts[a.url] || 0));
-    const sources = boostedResults.slice(0, 6).map((r, i) => ({
-      title: r.title || 'Untitled',
-      url: r.url,
-      snippet: r.content || r.snippet || '',
-      relevance: Math.max(0.1, 1 - (i * 0.12)),
-      feedback: boosts[r.url] || 0,
-      intent: intentResult.intent, // Phase 2: tag each source with classified intent
-    }));
+      // 2. Query chaining with ranked follow-up searches
+      const runSearch = async (q) => {
+        const data = await searchSearXNG(q, {
+          engines: getLaneSearchEngines(lane, intentResult.intent),
+        });
+        return rankAndDiversifyResults(data.results || [], {
+          intent: intentResult.intent,
+          query: q,
+          limit: laneConfig.resultLimit,
+        });
+      };
+      const preChainLen = rawResults.length;
+      const chainedResults = await maybeChain(query.trim(), rawResults, runSearch);
+      const finalResults = rankAndDiversifyResults(chainedResults, {
+        intent: intentResult.intent,
+        query,
+        limit: laneConfig.resultLimit,
+      });
+      const chained = finalResults.length > preChainLen;
 
-    // 5. Confidence based on result count and quality
-    const confidence = Math.min(0.95, 0.4 + (finalResults.length / 20) * 0.55);
+      // 3. Synthesize in parallel with related queries
+      const [answer, relatedQueries] = await Promise.all([
+        synthesizeWithGroq(query, finalResults, role, mode, laneConfig),
+        laneConfig.enableRelatedQueries ? generateRelatedQueries(query, role) : Promise.resolve([]),
+      ]);
+
+      // 4. Apply feedback boosts + format sources
+      const queryHash = sha256(query.trim());
+      const boosts = await getFeedbackBoosts(queryHash);
+      const boostedResults = [...finalResults].sort((a, b) => (boosts[b.url] || 0) - (boosts[a.url] || 0));
+      const sources = formatSources(boostedResults, laneConfig.maxSources, boosts, intentResult.intent);
+
+      // 5. Confidence based on result count and quality
+      const confidence = Math.min(0.95, 0.4 + (finalResults.length / 20) * 0.55);
+      const response = { answer, sources, confidence, relatedQueries, chained, intent: intentResult.intent, lane };
+      setCachedSearchResponse(cacheKey, response, laneConfig.cacheTtlMs);
+      return response;
+    });
+
     const latencyMs = Date.now() - startTime;
+    attachSearchHeaders(res, {
+      lane,
+      intent: intentResult.intent,
+      cacheHit: false,
+      deduped,
+      chained: Boolean(payload.chained),
+    });
+    res.json(payload);
 
-    res.json({ answer, sources, confidence, relatedQueries, chained, intent: intentResult.intent });
-
-    // Phase 2: analytics tracking (fire-and-forget, never throws)
     trackSearch({
       query: query.trim(),
       intent: intentResult.intent,
-      result_count: finalResults.length,
+      result_count: payload.sources.length,
       latency_ms: latencyMs,
       cache_hit: false,
     }).catch(() => {});
 
-    analytics.log(query, mode, role, confidence, latencyMs);
+    analytics.log(query, mode, role, payload.confidence, latencyMs);
+    recordSearchTelemetry({
+      lane,
+      intent: intentResult.intent,
+      cacheHit: false,
+      deduped,
+      chained: Boolean(payload.chained),
+      latencyMs,
+      resultCount: payload.sources.length,
+    });
 
   } catch (err) {
     console.error('[research] error:', err.message);
+    recordSearchTelemetry({
+      lane,
+      intent: intentResult.intent,
+      cacheHit: false,
+      deduped: false,
+      chained: false,
+      latencyMs: Date.now() - startTime,
+      resultCount: 0,
+      status: 'error',
+    });
     res.status(500).json({
       error: 'Research engine error',
       details: err.message,
@@ -664,6 +800,9 @@ app.post('/api/research/stream', async (req, res) => {
   const startTime = Date.now();
   let { query, role = 'owner' } = req.body;
   let mode = req.body.mode || classifyIntent(query);
+  const intentResult = getTypedIntent(query);
+  const lane = req.searchLane || 'customer';
+  const laneConfig = getLaneConfig(lane);
 
   if (!query || typeof query !== 'string' || query.trim().length === 0) {
     return res.status(400).json({ error: 'query is required' });
@@ -680,14 +819,20 @@ app.post('/api/research/stream', async (req, res) => {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
-  console.log(`[stream] query="${query}" role=${role} mode=${mode}`);
+  console.log(`[stream] lane=${lane} query="${query}" role=${role} mode=${mode}`);
 
   try {
     // 1. Signal: searching
     send('status', { stage: 'searching', message: 'Searching across engines...' });
 
-    const searchData = await searchSearXNG(query.trim());
-    const rawResults = searchData.results || [];
+    const searchData = await searchSearXNG(query.trim(), {
+      engines: getLaneSearchEngines(lane, intentResult.intent),
+    });
+    const rawResults = rankAndDiversifyResults(searchData.results || [], {
+      intent: intentResult.intent,
+      query,
+      limit: laneConfig.resultLimit,
+    });
 
     if (rawResults.length === 0) {
       send('error', { message: 'No results found. Try rephrasing.' });
@@ -701,11 +846,17 @@ app.post('/api/research/stream', async (req, res) => {
       send('status', { stage: 'refining', message: 'Refining search for better results...' });
       const refinedQuery = `${query.trim()} HVAC ${mode === 'technical' ? 'troubleshooting' : mode === 'business' ? 'pricing' : mode === 'compliance' ? 'regulations' : 'explained'}`;
       try {
-        const refined = await searchSearXNG(refinedQuery);
+        const refined = await searchSearXNG(refinedQuery, {
+          engines: getLaneSearchEngines(lane, intentResult.intent),
+        });
         if (refined.results?.length) {
           const seen = new Set(rawResults.map(r => r.url));
           const extra = refined.results.filter(r => !seen.has(r.url));
-          finalResults = [...rawResults, ...extra].slice(0, 12);
+          finalResults = rankAndDiversifyResults([...rawResults, ...extra], {
+            intent: intentResult.intent,
+            query,
+            limit: laneConfig.resultLimit,
+          });
         }
       } catch { /* use original */ }
     }
@@ -714,15 +865,17 @@ app.post('/api/research/stream', async (req, res) => {
     send('status', { stage: 'synthesizing', message: 'Synthesizing results...' });
 
     // Format sources early — send them while streaming the answer
-    const sources = finalResults.slice(0, 6).map((r, i) => ({
-      title: r.title || 'Untitled',
-      url: r.url,
-      snippet: r.content || r.snippet || '',
-      relevance: Math.max(0.1, 1 - (i * 0.12)),
-    }));
+    const sources = formatSources(finalResults, laneConfig.maxSources, null, intentResult.intent);
     send('sources', { sources });
 
     // Stream the Groq answer token by token
+    if (!groq) {
+      send('token', { token: buildFallbackAnswer(finalResults) });
+      send('done', { confidence: Math.min(0.95, 0.4 + (finalResults.length / 20) * 0.55), relatedQueries: [] });
+      analytics.log(query, mode, role, Math.min(0.95, 0.4 + (finalResults.length / 20) * 0.55), Date.now() - startTime);
+      return res.end();
+    }
+
     const roleContext = getRoleContext(role, mode);
     const topResults = finalResults.slice(0, 8).map((r, i) =>
       `[${i + 1}] ${r.title}\nURL: ${r.url}\n${r.content || r.snippet || ''}`
@@ -742,7 +895,7 @@ Provide a clear, actionable answer based on these results. Be specific with numb
       messages: [{ role: 'user', content: prompt }],
       model: 'llama-3.3-70b-versatile',
       temperature: 0.3,
-      max_tokens: 1024,
+      max_tokens: laneConfig.synthesisMaxTokens,
       stream: true,
     });
 
@@ -754,7 +907,7 @@ Provide a clear, actionable answer based on these results. Be specific with numb
     }
 
     // 4. Send related queries (fire-and-forget parallel)
-    const relatedQueries = await generateRelatedQueries(query, role);
+    const relatedQueries = laneConfig.enableRelatedQueries ? await generateRelatedQueries(query, role) : [];
     const confidence = Math.min(0.95, 0.4 + (finalResults.length / 20) * 0.55);
 
     send('done', { confidence, relatedQueries });
@@ -770,8 +923,12 @@ Provide a clear, actionable answer based on these results. Be specific with numb
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Sym Research API running on port ${PORT}`);
-  console.log(`   POST /api/research — SearXNG + Groq synthesis`);
-  console.log(`   GET  /health       — health check`);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`✅ Sym Research API running on port ${PORT}`);
+    console.log(`   POST /api/research — SearXNG + Groq synthesis`);
+    console.log(`   GET  /health       — health check`);
+  });
+}
+
+export { app };
