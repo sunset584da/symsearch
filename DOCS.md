@@ -65,6 +65,7 @@ curl -X POST http://46.225.28.233:8889/api/research \
 | `query` | string | ✅ | The search query |
 | `role` | string | — | `owner` / `dispatcher` / `tech` (default: `owner`) |
 | `mode` | string | — | `technical` / `business` / `compliance` / `general`. Auto-detected if omitted. |
+| `lane` | string | — | `customer` by default. `bot` is only honored for privileged internal tiers. |
 
 **Response:**
 ```json
@@ -75,13 +76,17 @@ curl -X POST http://46.225.28.233:8889/api/research \
   ],
   "confidence": 0.87,
   "relatedQueries": ["...", "...", "..."],
-  "chained": false
+  "chained": false,
+  "intent": "pricing",
+  "lane": "customer"
 }
 ```
 
 > **Intent auto-detection:** If `mode` is omitted, the API detects intent from the query. "error code E5" → `technical`. "how much should I charge" → `business`. "HVAC permit Texas" → `compliance`.
 
 > **Query chaining:** If initial results are weak (confidence < 0.6), the API silently fires a refined follow-up search, merges results, and re-synthesizes. The response `chained: true` indicates this happened.
+
+> **Response headers:** `X-SymSearch-Lane`, `X-SymSearch-Intent`, `X-SymSearch-Cache`, `X-SymSearch-Deduped`, and `X-SymSearch-Chained` are returned on `/api/research`.
 
 ---
 
@@ -132,7 +137,7 @@ while (true) {
 
 ### GET /api/analytics
 
-Returns aggregate stats for your API key usage (in-memory, resets on server restart).
+Returns aggregate stats plus recent search telemetry.
 
 ```bash
 curl http://46.225.28.233:8889/api/analytics \
@@ -142,11 +147,30 @@ curl http://46.225.28.233:8889/api/analytics \
 **Response:**
 ```json
 {
-  "total": 42,
-  "avgConf": "0.89",
-  "avgMs": 2340,
-  "byMode": { "technical": 18, "business": 15, "general": 9 }
+  "analytics": {
+    "total": 42,
+    "avgConf": "0.89",
+    "avgMs": 2340,
+    "byMode": { "technical": 18, "business": 15, "general": 9 }
+  },
+  "telemetry": {
+    "cacheHitRate": 0.42,
+    "dedupeRate": 0.08,
+    "chainedRate": 0.17,
+    "byLane": { "customer": 30, "bot": 12 }
+  }
 }
+```
+
+---
+
+### GET /api/telemetry
+
+Returns recent in-memory platform telemetry for internal debugging.
+
+```bash
+curl http://46.225.28.233:8889/api/telemetry \
+  -H "X-Research-Key: YOUR_KEY"
 ```
 
 ---
@@ -207,4 +231,19 @@ On 429, the body includes `retryAfter` (seconds until reset).
 
 ---
 
-*Built by the Sym team. Powered by SearXNG + Groq. $0/mo infrastructure cost.*
+## Environment
+
+Use `.env.example` as the baseline. The runtime variables that matter are:
+
+- `RESEARCH_INTERNAL_KEY`
+- `SEARXNG_URL`
+- `SEARXNG_KEY`
+- `GROQ_API_KEY`
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+- `STRIPE_SECRET_KEY`
+- `PRICE_STARTER`
+- `PRICE_PRO`
+- `PRICE_ENTERPRISE`
+
+*Built by the Sym team. Powered by SearXNG + Groq.*

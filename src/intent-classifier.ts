@@ -4,7 +4,7 @@
  * HVAC-domain aware.
  */
 
-export type IntentType = 'troubleshooting' | 'competitor_intel' | 'pricing' | 'code_docs';
+export type IntentType = 'troubleshooting' | 'competitor_intel' | 'pricing' | 'code_docs' | 'compliance';
 
 export interface IntentResult {
   intent: IntentType;
@@ -20,6 +20,8 @@ const INTENT_KEYWORDS: Record<IntentType, RegExp> = {
   pricing: /\b(price|pricing|cost|how much|rate|quote|estimate|invoice|charge|fee|labor rate|hourly rate|flat rate|service call|diagnostic fee|install cost|replacement cost|unit price|equipment price|profit margin|markup|bid|proposal|contract|financing|payment plan|subscription|monthly|annual|warranty cost|maintenance plan|agreement|tune.?up|pm price|preventive maintenance cost|budget|revenue|gross profit|net)\b/i,
 
   code_docs: /\b(api|sdk|code|documentation|docs|manual|spec|technical spec|data sheet|wiring diagram|install guide|setup guide|controller|thermostat manual|modbus|bacnet|lon|ecm|vfd|communicating|wifi setup|app setup|integration|protocol|register|parameter|firmware|software|configure|configuration|sequence of operations|soo|startup procedure|commissioning|engineer spec|submittal|ahri cert|seer2|energy star cert|nate cert|ahj|permit drawing|mechanical drawing|cut sheet)\b/i,
+
+  compliance: /\b(permit|permitting|permit office|inspection|inspector|license|licensed|licensing|registration|registered contractor|code compliance|mechanical code|building code|city code|municipal code|ordinance|regulation|regulated|epa|certification|nate|ahri|osha|bonded|bonding|ceu|continuing education|state board|tdlr|county permit|city permit|authority having jurisdiction|ahj)\b/i,
 };
 
 // Bonus weight for secondary HVAC context signals
@@ -35,6 +37,7 @@ function scoreQuery(query: string): Record<IntentType, number> {
     competitor_intel: 0,
     pricing: 0,
     code_docs: 0,
+    compliance: 0,
   };
 
   const q = query.toLowerCase();

@@ -9,6 +9,7 @@ const INTENT_KEYWORDS = {
     competitor_intel: /\b(competitor|competition|vs\b|versus|compared to|alternative|market share|who else|other companies|other hvac|trane vs|carrier vs|lennox vs|rheem vs|goodman vs|amana vs|york vs|daikin vs|mitsubishi vs|compare brands|best brand|top brand|rated hvac|review|ranking|dealer|distributor|franchise|service area|market|\bICP\b|Weil-McLain|Bosch hvac|new company|startup hvac|local competitor)\b/i,
     pricing: /\b(price|pricing|cost|how much|rate|quote|estimate|invoice|charge|fee|labor rate|hourly rate|flat rate|service call|diagnostic fee|install cost|replacement cost|unit price|equipment price|profit margin|markup|bid|proposal|contract|financing|payment plan|subscription|monthly|annual|warranty cost|maintenance plan|agreement|tune.?up|pm price|preventive maintenance cost|budget|revenue|gross profit|net)\b/i,
     code_docs: /\b(api|sdk|code|documentation|docs|manual|spec|technical spec|data sheet|wiring diagram|install guide|setup guide|controller|thermostat manual|modbus|bacnet|lon|ecm|vfd|communicating|wifi setup|app setup|integration|protocol|register|parameter|firmware|software|configure|configuration|sequence of operations|soo|startup procedure|commissioning|engineer spec|submittal|ahri cert|seer2|energy star cert|nate cert|ahj|permit drawing|mechanical drawing|cut sheet)\b/i,
+    compliance: /\b(permit|permitting|permit office|inspection|inspector|license|licensed|licensing|registration|registered contractor|code compliance|mechanical code|building code|city code|municipal code|ordinance|regulation|regulated|epa|certification|nate|ahri|osha|bonded|bonding|ceu|continuing education|state board|tdlr|county permit|city permit|authority having jurisdiction|ahj)\b/i,
 };
 // Bonus weight for secondary HVAC context signals
 const HVAC_CONTEXT_PATTERN = /\b(hvac|ac\b|a\/c|heat pump|furnace|boiler|chiller|air handler|ahu|rtu|rooftop unit|mini.?split|ductless|zone|vav|cooling|heating|refrigeration|condenser|evaporator|compressor|tonnage|btu|eer|cop|iaq|zoning|ductwork|damper|economizer|vrf)\b/i;
@@ -22,6 +23,7 @@ function scoreQuery(query) {
         competitor_intel: 0,
         pricing: 0,
         code_docs: 0,
+        compliance: 0,
     };
     const q = query.toLowerCase();
     for (const [intent, pattern] of Object.entries(INTENT_KEYWORDS)) {
