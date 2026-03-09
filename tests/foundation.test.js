@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { buildSearchCacheKey, dedupeSearchRequest, getCachedSearchResponse, setCachedSearchResponse } from '../lib/search-cache.js';
 import { getLaneConfig, getLaneSearchEngines, resolveSearchLane } from '../lib/request-lane.js';
 import { rankAndDiversifyResults } from '../lib/source-policy.js';
+import { classifyIntent } from '../dist/intent-classifier.js';
 
 describe('request lanes', () => {
   it('keeps customer lane as default', () => {
@@ -74,5 +75,12 @@ describe('source policy', () => {
     const carrierCount = ranked.filter((item) => item.hostname === 'carrier.com').length;
     assert.equal(carrierCount, 2);
     assert.ok(ranked.length >= 3);
+  });
+});
+
+describe('intent classifier', () => {
+  it('routes permit and license queries into compliance', () => {
+    const result = classifyIntent('HVAC permit Houston Texas license requirements');
+    assert.equal(result.intent, 'compliance');
   });
 });
