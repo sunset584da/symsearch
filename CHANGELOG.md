@@ -8,3 +8,4 @@
 - converted tests to app-level execution and added foundation coverage for lanes, cache/dedupe, and source policy
 - fixed the startup guard so PM2 launches the API normally while tests still skip `app.listen()`
 - added a dedicated `compliance` intent so permit, license, and regulation queries stop misrouting into troubleshooting
+- taught the API to honor explicit `mode: compliance` and `mode: technical` so caller intent wins over ambiguous classifier output

@@ -602,7 +602,14 @@ function classifyIntent(query) {
 }
 
 // Phase 2 typed intent — wraps classifyIntentV2, used to tag search results
-function getTypedIntent(query) {
+function getTypedIntent(query, mode) {
+  const normalizedMode = String(mode || '').toLowerCase();
+  if (normalizedMode === 'technical') {
+    return { intent: 'troubleshooting', confidence: 0.96 };
+  }
+  if (normalizedMode === 'compliance') {
+    return { intent: 'compliance', confidence: 0.98 };
+  }
   return classifyIntentV2(query); // { intent: IntentType, confidence: number }
 }
 
@@ -648,7 +655,7 @@ app.post('/api/research', async (req, res) => {
   }
 
   // Phase 2: typed intent classification
-  const intentResult = getTypedIntent(query);
+  const intentResult = getTypedIntent(query, mode);
   const lane = req.searchLane || 'customer';
   const laneConfig = getLaneConfig(lane);
   const cacheKey = buildSearchCacheKey({
@@ -799,7 +806,7 @@ app.post('/api/research/stream', async (req, res) => {
   const startTime = Date.now();
   let { query, role = 'owner' } = req.body;
   let mode = req.body.mode || classifyIntent(query);
-  const intentResult = getTypedIntent(query);
+  const intentResult = getTypedIntent(query, mode);
   const lane = req.searchLane || 'customer';
   const laneConfig = getLaneConfig(lane);
 
@@ -930,4 +937,4 @@ if (process.env.SYMSEARCH_SKIP_LISTEN !== '1') {
   });
 }
 
-export { app };
+export { app, getTypedIntent };

@@ -1,10 +1,13 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
+process.env.SYMSEARCH_SKIP_LISTEN = '1';
+
 import { buildSearchCacheKey, dedupeSearchRequest, getCachedSearchResponse, setCachedSearchResponse } from '../lib/search-cache.js';
 import { getLaneConfig, getLaneSearchEngines, resolveSearchLane } from '../lib/request-lane.js';
 import { rankAndDiversifyResults } from '../lib/source-policy.js';
 import { classifyIntent } from '../dist/intent-classifier.js';
+const { getTypedIntent } = await import('../index.js');
 
 describe('request lanes', () => {
   it('keeps customer lane as default', () => {
@@ -81,6 +84,11 @@ describe('source policy', () => {
 describe('intent classifier', () => {
   it('routes permit and license queries into compliance', () => {
     const result = classifyIntent('HVAC permit Houston Texas license requirements');
+    assert.equal(result.intent, 'compliance');
+  });
+
+  it('trusts explicit compliance mode when provided by the caller', () => {
+    const result = getTypedIntent('totally ambiguous query', 'compliance');
     assert.equal(result.intent, 'compliance');
   });
 });

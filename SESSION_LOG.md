@@ -7,3 +7,4 @@
 - implemented the first platform hardening pass: env config, lane policy, cache/dedupe, source policy, telemetry, and in-repo tests
 - fixed the PM2 startup regression by replacing the import-meta startup guard with `SYMSEARCH_SKIP_LISTEN`
 - fixed live intent routing for permit and license queries by adding an explicit `compliance` intent across classifier, lane policy, and source scoring
+- fixed the API/router mismatch by honoring explicit request mode for compliance and technical flows
