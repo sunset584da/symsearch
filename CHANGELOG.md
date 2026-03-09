@@ -6,3 +6,4 @@
 - added customer vs bot request lanes, in-memory response caching, inflight dedupe, and telemetry headers for `/api/research`
 - removed Brave from default engine mixes and added source ranking/diversity policy for stronger result quality
 - converted tests to app-level execution and added foundation coverage for lanes, cache/dedupe, and source policy
+- fixed the startup guard so PM2 launches the API normally while tests still skip `app.listen()`

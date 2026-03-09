@@ -15,7 +15,6 @@ import cors from 'cors';
 import Groq from 'groq-sdk';
 import crypto from 'crypto';
 import Stripe from 'stripe';
-import { pathToFileURL } from 'node:url';
 
 // ─── Phase 2 modules (compiled from TypeScript) ───────────────────────────────
 import { classifyIntent as classifyIntentV2 } from './dist/intent-classifier.js';
@@ -923,7 +922,7 @@ Provide a clear, actionable answer based on these results. Be specific with numb
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.env.SYMSEARCH_SKIP_LISTEN !== '1') {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Sym Research API running on port ${PORT}`);
     console.log(`   POST /api/research — SearXNG + Groq synthesis`);
