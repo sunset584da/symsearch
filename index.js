@@ -19,7 +19,7 @@ import Stripe from 'stripe';
 // ─── Phase 2 modules (compiled from TypeScript) ───────────────────────────────
 import { classifyIntent as classifyIntentV2 } from './dist/intent-classifier.js';
 import { maybeChain } from './dist/query-chainer.js';
-import { trackSearch } from './dist/analytics.js';
+import { getSearchAnalyticsSummary, trackSearch } from './dist/analytics.js';
 import { runtimeConfig, getStartupWarnings } from './lib/runtime-config.js';
 import { getLaneConfig, getLaneSearchEngines, resolveSearchLane } from './lib/request-lane.js';
 import { buildSearchCacheKey, dedupeSearchRequest, getCachedSearchResponse, setCachedSearchResponse } from './lib/search-cache.js';
@@ -614,26 +614,11 @@ function getTypedIntent(query, mode) {
 }
 
 // ─── Analytics (in-memory) ────────────────────────────────────────────────────
-const analytics = {
-  requests: [],
-  log(query, mode, role, confidence, processingMs) {
-    this.requests.push({ query, mode, role, confidence, processingMs, ts: Date.now() });
-    if (this.requests.length > 1000) this.requests.shift(); // cap at 1k
-  },
-  summary() {
-    const total = this.requests.length;
-    const avgConf = total ? (this.requests.reduce((s, r) => s + r.confidence, 0) / total).toFixed(2) : 0;
-    const avgMs = total ? Math.round(this.requests.reduce((s, r) => s + r.processingMs, 0) / total) : 0;
-    const byMode = this.requests.reduce((acc, r) => { acc[r.mode] = (acc[r.mode] || 0) + 1; return acc; }, {});
-    return { total, avgConf, avgMs, byMode };
-  }
-};
-
 app.get('/api/analytics', (req, res) => {
   const key = req.headers['x-research-key'];
   if (!key || key !== RESEARCH_KEY) return res.status(403).json({ error: 'Forbidden' });
   res.json({
-    analytics: analytics.summary(),
+    analytics: getSearchAnalyticsSummary(),
     telemetry: getTelemetrySnapshot(),
   });
 });
@@ -688,6 +673,19 @@ app.post('/api/research', async (req, res) => {
         latencyMs,
         resultCount: cached.sources?.length || 0,
       });
+      trackSearch({
+        query: query.trim(),
+        intent: intentResult.intent,
+        result_count: cached.sources?.length || 0,
+        latency_ms: latencyMs,
+        cache_hit: true,
+        mode,
+        role,
+        lane,
+        confidence: cached.confidence,
+        deduped: false,
+        chained: Boolean(cached.chained),
+      }).catch(() => {});
       return res.json(cached);
     }
 
@@ -769,9 +767,13 @@ app.post('/api/research', async (req, res) => {
       result_count: payload.sources.length,
       latency_ms: latencyMs,
       cache_hit: false,
+      mode,
+      role,
+      lane,
+      confidence: payload.confidence,
+      deduped,
+      chained: Boolean(payload.chained),
     }).catch(() => {});
-
-    analytics.log(query, mode, role, payload.confidence, latencyMs);
     recordSearchTelemetry({
       lane,
       intent: intentResult.intent,
@@ -841,6 +843,19 @@ app.post('/api/research/stream', async (req, res) => {
     });
 
     if (rawResults.length === 0) {
+      trackSearch({
+        query: query.trim(),
+        intent: intentResult.intent,
+        result_count: 0,
+        latency_ms: Date.now() - startTime,
+        cache_hit: false,
+        mode,
+        role,
+        lane,
+        confidence: 0,
+        deduped: false,
+        chained: false,
+      }).catch(() => {});
       send('error', { message: 'No results found. Try rephrasing.' });
       return res.end();
     }
@@ -876,9 +891,22 @@ app.post('/api/research/stream', async (req, res) => {
 
     // Stream the Groq answer token by token
     if (!groq) {
+      const fallbackConfidence = Math.min(0.95, 0.4 + (finalResults.length / 20) * 0.55);
       send('token', { token: buildFallbackAnswer(finalResults) });
-      send('done', { confidence: Math.min(0.95, 0.4 + (finalResults.length / 20) * 0.55), relatedQueries: [] });
-      analytics.log(query, mode, role, Math.min(0.95, 0.4 + (finalResults.length / 20) * 0.55), Date.now() - startTime);
+      send('done', { confidence: fallbackConfidence, relatedQueries: [] });
+      trackSearch({
+        query: query.trim(),
+        intent: intentResult.intent,
+        result_count: sources.length,
+        latency_ms: Date.now() - startTime,
+        cache_hit: false,
+        mode,
+        role,
+        lane,
+        confidence: fallbackConfidence,
+        deduped: false,
+        chained: false,
+      }).catch(() => {});
       return res.end();
     }
 
@@ -917,8 +945,19 @@ Provide a clear, actionable answer based on these results. Be specific with numb
     const confidence = Math.min(0.95, 0.4 + (finalResults.length / 20) * 0.55);
 
     send('done', { confidence, relatedQueries });
-
-    analytics.log(query, mode, role, confidence, Date.now() - startTime);
+    trackSearch({
+      query: query.trim(),
+      intent: intentResult.intent,
+      result_count: sources.length,
+      latency_ms: Date.now() - startTime,
+      cache_hit: false,
+      mode,
+      role,
+      lane,
+      confidence,
+      deduped: false,
+      chained: finalResults.length > rawResults.length,
+    }).catch(() => {});
     res.end();
 
   } catch (err) {

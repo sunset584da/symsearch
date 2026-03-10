@@ -3,7 +3,7 @@
  * Keyword matching + heuristics, no external API calls.
  * HVAC-domain aware.
  */
-export type IntentType = 'troubleshooting' | 'competitor_intel' | 'pricing' | 'code_docs';
+export type IntentType = 'troubleshooting' | 'competitor_intel' | 'pricing' | 'code_docs' | 'compliance';
 export interface IntentResult {
     intent: IntentType;
     confidence: number;

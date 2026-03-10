@@ -1,13 +1,22 @@
-import { describe, it } from 'node:test';
+import { after, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 process.env.SYMSEARCH_SKIP_LISTEN = '1';
+const analyticsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'symsearch-foundation-analytics-'));
+process.env.SYMSEARCH_ANALYTICS_DIR = analyticsDir;
 
 import { buildSearchCacheKey, dedupeSearchRequest, getCachedSearchResponse, setCachedSearchResponse } from '../lib/search-cache.js';
 import { getLaneConfig, getLaneSearchEngines, resolveSearchLane } from '../lib/request-lane.js';
 import { rankAndDiversifyResults } from '../lib/source-policy.js';
 import { classifyIntent } from '../dist/intent-classifier.js';
 const { getTypedIntent } = await import('../index.js');
+
+after(() => {
+  fs.rmSync(analyticsDir, { recursive: true, force: true });
+});
 
 describe('request lanes', () => {
   it('keeps customer lane as default', () => {

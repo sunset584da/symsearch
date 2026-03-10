@@ -1,10 +1,7 @@
 /**
- * SymSearch Phase 2 — Search Analytics
- * Lightweight Supabase write for per-query search events.
- * Never throws — all errors are silently swallowed.
- *
- * Table: sym_search_analytics
- * Checked at startup with a SELECT; if absent, DB writes are skipped.
+ * SymSearch search analytics.
+ * Every request is persisted locally so analytics survive restarts.
+ * If the Supabase table exists, the same event is mirrored remotely.
  */
 import type { IntentType } from './intent-classifier.js';
 export interface SearchAnalyticsEvent {
@@ -13,9 +10,27 @@ export interface SearchAnalyticsEvent {
     result_count: number;
     latency_ms: number;
     cache_hit: boolean;
+    mode?: string;
+    role?: string;
+    lane?: string;
+    confidence?: number;
+    deduped?: boolean;
+    chained?: boolean;
+    created_at?: string;
 }
-/**
- * Track a search event. Never throws.
- * Silently skips if Supabase is not configured or table doesn't exist.
- */
+export interface SearchAnalyticsSummary {
+    total: number;
+    avgConf: string;
+    avgMs: number;
+    byMode: Record<string, number>;
+    byLane: Record<string, number>;
+    byIntent: Record<string, number>;
+    cacheHitRate: number;
+    storage: {
+        local: boolean;
+        path: string;
+        supabase: boolean;
+    };
+}
+export declare function getSearchAnalyticsSummary(): SearchAnalyticsSummary;
 export declare function trackSearch(event: SearchAnalyticsEvent): Promise<void>;

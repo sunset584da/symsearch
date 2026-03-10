@@ -8,3 +8,5 @@
 - fixed the PM2 startup regression by replacing the import-meta startup guard with `SYMSEARCH_SKIP_LISTEN`
 - fixed live intent routing for permit and license queries by adding an explicit `compliance` intent across classifier, lane policy, and source scoring
 - fixed the API/router mismatch by honoring explicit request mode for compliance and technical flows
+- added the forward Supabase schema migration for `sym_search_analytics`, but stopped blocking on dead admin SQL paths
+- switched SymSearch analytics to durable local JSONL persistence so search history and `/api/analytics` survive PM2 restarts on the VPS today

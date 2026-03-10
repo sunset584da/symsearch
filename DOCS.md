@@ -151,7 +151,15 @@ curl http://46.225.28.233:8889/api/analytics \
     "total": 42,
     "avgConf": "0.89",
     "avgMs": 2340,
-    "byMode": { "technical": 18, "business": 15, "general": 9 }
+    "byMode": { "technical": 18, "business": 15, "general": 9 },
+    "byLane": { "customer": 30, "bot": 12 },
+    "byIntent": { "troubleshooting": 18, "pricing": 12, "compliance": 12 },
+    "cacheHitRate": 0.42,
+    "storage": {
+      "local": true,
+      "path": "/root/clawd/sym-research-api/data/analytics",
+      "supabase": false
+    }
   },
   "telemetry": {
     "cacheHitRate": 0.42,
@@ -241,6 +249,9 @@ Use `.env.example` as the baseline. The runtime variables that matter are:
 - `GROQ_API_KEY`
 - `SUPABASE_URL`
 - `SUPABASE_ANON_KEY`
+- `SYMSEARCH_ANALYTICS_DIR`
+- `SYMSEARCH_ANALYTICS_RETENTION_DAYS`
+- `SYMSEARCH_ANALYTICS_MEMORY_LIMIT`
 - `STRIPE_SECRET_KEY`
 - `PRICE_STARTER`
 - `PRICE_PRO`

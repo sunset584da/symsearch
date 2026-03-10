@@ -6,6 +6,9 @@
 
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 process.env.RESEARCH_INTERNAL_KEY = 'test-internal-key';
 process.env.SEARCH_INTERNAL_KEY = 'test-internal-key';
@@ -14,6 +17,8 @@ process.env.SUPABASE_URL = '';
 process.env.SUPABASE_ANON_KEY = '';
 process.env.STRIPE_SECRET_KEY = '';
 process.env.SYMSEARCH_SKIP_LISTEN = '1';
+const analyticsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'symsearch-api-analytics-'));
+process.env.SYMSEARCH_ANALYTICS_DIR = analyticsDir;
 
 const { app } = await import('../index.js');
 
@@ -32,6 +37,7 @@ before(async () => {
 after(async () => {
   if (!server) return;
   await new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  fs.rmSync(analyticsDir, { recursive: true, force: true });
 });
 
 // ─── Health ──────────────────────────────────────────────────────────────────
