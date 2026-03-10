@@ -11,3 +11,4 @@
 - taught the API to honor explicit `mode: compliance` and `mode: technical` so caller intent wins over ambiguous classifier output
 - added a forward Supabase migration for `sym_search_analytics` for future remote mirroring when DB admin access is available
 - added durable local analytics persistence with daily JSONL rotation so `/api/analytics` survives PM2 restarts even when Supabase mirroring is unavailable
+- moved ad-hoc env backups out of the live repo path and ignored future `.env.*` files so secret snapshots stop showing up as loose files in deployments

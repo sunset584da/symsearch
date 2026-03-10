@@ -10,3 +10,4 @@
 - fixed the API/router mismatch by honoring explicit request mode for compliance and technical flows
 - added the forward Supabase schema migration for `sym_search_analytics`, but stopped blocking on dead admin SQL paths
 - switched SymSearch analytics to durable local JSONL persistence so search history and `/api/analytics` survive PM2 restarts on the VPS today
+- cleaned up live secret hygiene by moving the stray `.env.bak-20260309` out of `/root/clawd/sym-research-api` and ignoring future `.env.*` repo clutter
