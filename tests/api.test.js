@@ -71,6 +71,15 @@ describe('Auth middleware', () => {
     });
     assert.equal(res.status, 400);
   });
+
+  it('POST /api/private-search rejects missing internal key', async () => {
+    const res = await fetch(`${baseUrl}/api/private-search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: 'R-454B install safety requirements' }),
+    });
+    assert.equal(res.status, 403);
+  });
 });
 
 // ─── Rate Limiting ────────────────────────────────────────────────────────────

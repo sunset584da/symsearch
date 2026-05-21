@@ -25,6 +25,7 @@ import { getLaneConfig, getLaneSearchEngines, resolveSearchLane } from './lib/re
 import { buildSearchCacheKey, dedupeSearchRequest, getCachedSearchResponse, setCachedSearchResponse } from './lib/search-cache.js';
 import { rankAndDiversifyResults } from './lib/source-policy.js';
 import { attachSearchHeaders, getTelemetrySnapshot, recordSearchTelemetry } from './lib/telemetry.js';
+import { rankPrivateChunks } from './lib/private-search.js';
 
 const app = express();
 const PORT = runtimeConfig.port;
@@ -33,6 +34,7 @@ const SEARXNG_URL = runtimeConfig.searxngUrl;
 const SEARXNG_KEY = runtimeConfig.searxngAuthKey;
 const SUPABASE_URL = runtimeConfig.supabaseUrl;
 const SUPABASE_KEY = runtimeConfig.supabaseAnonKey;
+const SUPABASE_PRIVATE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || SUPABASE_KEY;
 const stripe = runtimeConfig.stripeSecretKey ? new Stripe(runtimeConfig.stripeSecretKey) : null;
 const groq = runtimeConfig.groqApiKey ? new Groq({ apiKey: runtimeConfig.groqApiKey }) : null;
 const startupWarnings = getStartupWarnings();
@@ -70,6 +72,27 @@ async function supabaseFetch(path, options = {}) {
     if (!text) return { ok: true };
     try { return JSON.parse(text); } catch { return { ok: true }; }
   }
+  return res.json();
+}
+
+async function privateSupabaseFetch(path, options = {}) {
+  if (!SUPABASE_URL || !SUPABASE_PRIVATE_KEY) return null;
+  const { headers: extraHeaders = {}, ...restOptions } = options;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    headers: {
+      'apikey': SUPABASE_PRIVATE_KEY,
+      'Authorization': `Bearer ${SUPABASE_PRIVATE_KEY}`,
+      'Content-Type': 'application/json',
+      ...extraHeaders,
+    },
+    ...restOptions,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    console.error(`[private-supabase] ${options.method || 'GET'} ${path} → ${res.status}: ${text.substring(0, 160)}`);
+    return null;
+  }
+  if (res.status === 204) return { ok: true };
   return res.json();
 }
 
@@ -221,6 +244,14 @@ app.use('/api/research', async (req, res, next) => {
     req.searchLane = resolveSearchLane('free', requestedLane);
     next();
   }
+});
+
+app.use('/api/private-search', (req, res, next) => {
+  const key = req.headers['x-research-key'] || req.headers['authorization']?.replace('Bearer ', '');
+  if (!INTERNAL_KEY || key !== INTERNAL_KEY) {
+    return res.status(403).json({ error: 'Missing or invalid internal research key.' });
+  }
+  next();
 });
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
@@ -627,6 +658,30 @@ app.get('/api/telemetry', (req, res) => {
   const key = req.headers['x-research-key'];
   if (!key || key !== RESEARCH_KEY) return res.status(403).json({ error: 'Forbidden' });
   res.json(getTelemetrySnapshot());
+});
+
+app.post('/api/private-search', async (req, res) => {
+  const query = String(req.body?.query || '').trim();
+  const mode = String(req.body?.mode || 'tech');
+  const limit = Math.min(Math.max(Number(req.body?.limit || 5), 1), 20);
+  const sourceBias = Array.isArray(req.body?.sourceBias) ? req.body.sourceBias.map(String) : [];
+
+  if (!query) return res.status(400).json({ error: 'query is required' });
+
+  const select = 'id,source_id,url,title,content,authority,safety_label,metadata';
+  const rows = await privateSupabaseFetch(`symsearch_private_chunks?select=${select}&limit=500`);
+  if (!rows) return res.status(503).json({ error: 'private corpus unavailable' });
+
+  const results = rankPrivateChunks(rows, { query, mode, limit, sourceBias });
+  res.json({
+    query,
+    results,
+    trace: {
+      source: 'private_hvac_corpus',
+      mode,
+      scannedChunks: rows.length,
+    },
+  });
 });
 
 // ─── Main Research Endpoint ───────────────────────────────────────────────────
